@@ -1,0 +1,99 @@
+---
+layout: post
+title: "数据库-mysql"
+---
+# 连接：
+
+- 嵌套循环连接(Nested Loop Join)：小表做驱动表
+    - Index Nested-Loop Join（INL）：t1取一条，去t2查，循环出结果，驱动表扫全表，被驱动表走索引单查
+    - Block Nested-Loop Join（BNL）：t1全取出放join_buffer，t2一条条取对比buffer
+- 合并连接（Sorted merge join）	：两端都有序 效率高
+- 哈希连接（hash join）：数据量大，无索引，跟BNL有点像，将join_buffer换成了hash table
+mysql8以上才支持hash join
+# 执行流程：
+- 查询缓存
+- 解析器生成解析树
+- 预处理再次生成解析树
+- 查询优化器
+- 查询执行计划
+- 查询执行引擎
+- 查询数据返回结果
+# 事务：
+- ACID：redo，undo 日志，先写redo日志，定期刷到磁盘，如果中间重启/宕机，读redo日志重做。undo日志记录旧数据，用于回滚
+- 隔离级别
+    - read uncommitted：脏读
+    - read committed：不可重复度
+    - repeatable read：可重复度，幻读
+    - serializable：串行
+- mvcc(Multi-Version Concurrency Control)：快照，多版本，rr和rc下工作，trx_id和undo_log，根据不同的隔离级别，根据trx_id判断读undo_log中的值
+每个事务或者语句有自己的一致性视图（read-view）。普通查询语句是一致性读，一致性读会根据 row trx_id 和一致性视图确定数据版本的可见性。
+- 分布式事务：cap、base、柔性事务、幂等，JTA
+    - 两阶段提交（2pc）/XA：第一阶段（prepare）事务管理器向本地资源管理器询问是否就绪，第二阶段（commit/rollback）根据反馈通知本地提交或回滚
+        - 存在一些问题：同步阻塞、单点故障、提交阶段可能数据不一致，部分接收消息
+    - 三阶段提交（3pc）：CanCommit询问是否可执行，PreCommit执行或者中断，DoCommit提交事务或者中断事务
+    - saga：将大事务拆分若干个子事务，，为没一个子事务设计补偿动作，要嘛都成功，要嘛都补偿
+    - TCC（Try-Confirm-Cancel）：Try阶段尝试执行，完成业务检查，预留业务资源。confirm阶段确认执行，不做业务检查，直接使用预留资源，满足幂等性，失败后会重试。cancel阶段取消执行，释放预留资源，也满足幂等性。
+        - 解决了XA的问题，集群解决单点问题，引入超时解决同步阻塞，补偿机制处理数据不一致
+    - 本地消息表：靠本地日志表手工做重试补偿
+    - 可靠消息最终一致性：支持事务消息的mq，比如rocketmq
+    - 尽最大努力通知：
+    - Seata框架支持AT、TCC、SAGA、XA
+# 锁：
+- 分类：
+    - 表锁：MyISAM，共享锁（读锁），排他锁（写锁），开销小，加锁快，无死锁，冲突概率大
+    - 行锁：Innodb，共享锁（读锁S），排他锁（写锁X），意向共享锁（IS），意向排它锁（IX），开销大，加锁慢，会出现死锁，冲突概率小
+    - 页锁：BDB，开销、加锁时间和锁粒度介于表锁和行锁之间，会出现死锁，并发处理能力一般
+    - 记录锁（Record Lock）：单个行记录锁
+    - 间隙锁（Gap Lock）：锁定一个范围，不包括记录本身，在sql中有范围，比如>,<，会锁定一些本身没有记录的键值，会造成无法插入
+    - 临键锁（Next-Key Lock）：同时锁住数据+间隙，innodb rr默认是这个，它的封锁范围，既包含索引记录，又包含索引区间
+    - 自增锁（Auto-inc Lock）：有自增id的表，插入的时候会等锁
+    - 共享/排他锁（Shared and Exclusive Lock）
+        - 共享锁（读锁）：其他事务可以读，但不能写。
+        - 排他锁（写锁） ：其他事务不能读，也不能写。
+    - 意向锁（Intention Lock）：意向锁仅表意向，是一种较弱的锁，意向锁之间兼容并行(IS、IX 之间关系兼容并行)。 X与ISIX互斥；S与IX互斥
+        - 意向共享锁（IS）：获取共享锁时，需要先获取IS锁
+        - 意向排它锁（IX）：获取排它锁时，需要先获取IX锁
+        - 插入意向锁：如果插入到同一索引间隙中的多个事务没有插入到该间隙中的相同位置，则它们不需要等待对方
+
+
+# 索引：
+- 分类：
+    - Primary Key：InnoDB存储引擎的表会存在主键（唯一非null），如果建表的时候没有指定主键，则会使用第一非空的唯一索引作为聚集索引，否则InnoDB会自动帮你创建一个不可见的、长度为6字节的row_id用来作为聚集索引。
+    - 单列索引：一个索引只有一个字段
+    - 唯一索引（Unique）：字段的值必须唯一，允许为空，主键索引是特殊的唯一索引
+    - 组合索引：一个索引有多个字段，遵循最左前缀
+    - 空间索引（SPATIAL）：
+    - 聚集索引：以主键构建的B+树索引
+    - 非聚集索引（辅助索引）：以非主键构建的B+树索引，叶子节点没有存储所有字段信息，只有索引字段的信息，需要用主键再查聚集索引（回表）
+    - 覆盖索引：查询字段在索引中能找到，无需回表
+- 索引结构
+    - Hash索引：只能等值查询，少用
+    - B-Tree索引：常用，平衡多叉查找树  B+树：非叶子节点只索引，叶子节点保存所有数据并指针指向下个节点，性能接近二分查找
+    - full-text全文索引：倒排索引
+    - R-Tree索引：空间索引使用，多维索引
+- 索引创建原则：
+    - 单表索引不能太多
+    - 更新多的表或字段尽可能索引少
+    - 数据值类型少不建立索引：比如性别
+
+# 优化：
+- 性能分析：
+    - 执行计划（explain）
+        - id：判断执行顺序，id相同代表同一组顺序从上往下执行，id不同，id值越大优先级越高
+        - select_type：simple，primary，subquery，derived，union，union result
+        - type：system > const > equ_ref > ref > range > index > all
+        - possible_keys，key，key_len，ref
+        - rows：扫描行数
+        - Extra：Using filesort（order by，查后排序，尽量避免），Using temporary，Using index（覆盖索引），Using where， Using join buffer，impossible where，select table optimize away，distinct
+    - 常见的原因
+        - 查询语句写的烂
+        - 索引失效（单值、复合）
+        - 关联查询太多join（设计缺陷或不得已的需求）
+        - 服务器调优及各个参数设置（缓冲、线程数等）
+- 优化原则：
+    - 尽量全值匹配，最左法则
+    - 不在索引列上做计算、函数、类型转换，is null，is not null，会索引失效
+    - 在索引中排序，避免filesort排序
+    - 小结果集驱动大结果集
+    - 使用最小columns
+    - 尽量避免复杂的join和子查询
